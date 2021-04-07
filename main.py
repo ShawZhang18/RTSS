@@ -23,7 +23,7 @@ parser.add_argument('--epochs', type=int, default=10,
                     help='number of epochs to train')
 parser.add_argument('--train_bsize', type=int, default=6,
                     help='batch size for training (default: 12)')
-parser.add_argument('--test_bsize', type=int, default=4,
+parser.add_argument('--test_bsize', type=int, default=1,
                     help='batch size for testing (default: 8)')
 parser.add_argument('--save_path', type=str, default='results/pretrained_anynet',
                     help='the path of saving checkpoints and log')

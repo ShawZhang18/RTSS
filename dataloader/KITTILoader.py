@@ -20,11 +20,13 @@ def default_loader(path):
     return Image.open(path).convert('RGB')
 
 def disparity_loader(path):
-    return Image.open(path)
+    return Image.open(path).convert('L')
 
+w_crop = 640
+h_crop = 400
 
 class myImageFloder(data.Dataset):
-    def __init__(self, left, right, left_disparity, training, loader=default_loader, dploader= disparity_loader):
+    def __init__(self, left, right, left_disparity, training, fn=None, loader=default_loader, dploader= disparity_loader):
  
         self.left = left
         self.right = right
@@ -32,6 +34,7 @@ class myImageFloder(data.Dataset):
         self.loader = loader
         self.dploader = dploader
         self.training = training
+        self.fn = fn
 
     def __getitem__(self, index):
         left  = self.left[index]
@@ -53,7 +56,7 @@ class myImageFloder(data.Dataset):
            left_img = left_img.crop((x1, y1, x1 + tw, y1 + th))
            right_img = right_img.crop((x1, y1, x1 + tw, y1 + th))
 
-           dataL = np.ascontiguousarray(dataL,dtype=np.float32)/256
+           dataL = np.ascontiguousarray(dataL,dtype=np.float32)
            dataL = dataL[y1:y1 + th, x1:x1 + tw]
 
            processed = preprocess.get_transform(augment=False)  
@@ -64,18 +67,20 @@ class myImageFloder(data.Dataset):
         else:
            w, h = left_img.size
 
-           left_img = left_img.crop((w-1232, h-368, w, h))
-           right_img = right_img.crop((w-1232, h-368, w, h))
+           left_img = left_img.crop((w-w_crop, h-h_crop, w, h))
+           right_img = right_img.crop((w-w_crop, h-h_crop, w, h))
            w1, h1 = left_img.size
 
-           dataL = dataL.crop((w-1232, h-368, w, h))
-           dataL = np.ascontiguousarray(dataL,dtype=np.float32)/256
+           # print(w1, h1)
+           dataL = dataL.crop((w-w_crop, h-h_crop, w, h))
+           dataL = np.ascontiguousarray(dataL,dtype=np.float32)
 
            processed = preprocess.get_transform(augment=False)  
            left_img       = processed(left_img)
            right_img      = processed(right_img)
+           fn0 = self.fn[index]
 
-           return left_img, right_img, dataL
+           return left_img, right_img, dataL, fn0
 
     def __len__(self):
         return len(self.left)

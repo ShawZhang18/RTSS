@@ -13,6 +13,9 @@ import torch.backends.cudnn as cudnn
 
 import models.anynet
 
+import numpy as np
+import cv2 as cv2
+
 parser = argparse.ArgumentParser(description='Anynet fintune on KITTI')
 parser.add_argument('--maxdisp', type=int, default=192,
                     help='maxium disparity')
@@ -22,11 +25,11 @@ parser.add_argument('--maxdisplist', type=int, nargs='+', default=[12, 3, 3])
 parser.add_argument('--datatype', default='2015',
                     help='datapath')
 parser.add_argument('--datapath', default=None, help='datapath')
-parser.add_argument('--epochs', type=int, default=300,
+parser.add_argument('--epochs', type=int, default=400,
                     help='number of epochs to train')
-parser.add_argument('--train_bsize', type=int, default=6,
+parser.add_argument('--train_bsize', type=int, default=12,
                     help='batch size for training (default: 6)')
-parser.add_argument('--test_bsize', type=int, default=8,
+parser.add_argument('--test_bsize', type=int, default=1,
                     help='batch size for testing (default: 8)')
 parser.add_argument('--save_path', type=str, default='results/finetune_anynet',
                     help='the path of saving checkpoints and log')
@@ -63,7 +66,7 @@ def main():
     global args
     log = logger.setup_logger(args.save_path + '/training.log')
 
-    train_left_img, train_right_img, train_left_disp, test_left_img, test_right_img, test_left_disp = ls.dataloader(
+    train_left_img, train_right_img, train_left_disp, test_left_img, test_right_img, test_left_disp, test_fn = ls.dataloader(
         args.datapath,log, args.split_file)
 
     TrainImgLoader = torch.utils.data.DataLoader(
@@ -71,7 +74,7 @@ def main():
         batch_size=args.train_bsize, shuffle=True, num_workers=4, drop_last=False)
 
     TestImgLoader = torch.utils.data.DataLoader(
-        DA.myImageFloder(test_left_img, test_right_img, test_left_disp, False),
+        DA.myImageFloder(test_left_img, test_right_img, test_left_disp, False, test_fn),
         batch_size=args.test_bsize, shuffle=False, num_workers=4, drop_last=False)
 
     if not os.path.isdir(args.save_path):
@@ -186,7 +189,7 @@ def test(dataloader, model, log):
 
     model.eval()
 
-    for batch_idx, (imgL, imgR, disp_L) in enumerate(dataloader):
+    for batch_idx, (imgL, imgR, disp_L, fn) in enumerate(dataloader):
         imgL = imgL.float().cuda()
         imgR = imgR.float().cuda()
         disp_L = disp_L.float().cuda()
@@ -196,6 +199,16 @@ def test(dataloader, model, log):
             for x in range(stages):
                 output = torch.squeeze(outputs[x], 1)
                 D1s[x].update(error_estimating(output, disp_L).item())
+
+                for i in range(output.size()[0]):
+                    img_cpu = np.asarray(output.cpu())
+                    # img_cpu = np.asarray(disp_L.cpu())
+                    img_save = np.clip(img_cpu[i, :, :], 0, 2 ** 16)
+                    img_save = (img_save * 256.0).astype(np.uint16)
+                    name = "/home/zhangxiao/code/AnyNet/results/zacao_kitti/png_result/" + fn[0]
+                    # cv2.imshow(name, img_save)
+                    cv2.imwrite(name, img_save)
+                    # cv2.waitKey(0)
 
         info_str = '\t'.join(['Stage {} = {:.4f}({:.4f})'.format(x, D1s[x].val, D1s[x].avg) for x in range(stages)])
 

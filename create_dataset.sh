@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-scenflow_data_path=path-to-dataset/SceneFlow
+scenflow_data_path=/home/zhangxiao/data/data_scene_flow/
 
 monkaa_frames_cleanpass=$scenflow_data_path"/monkaa/frames_cleanpass"
 monkaa_disparity=$scenflow_data_path"/monkaa/disparity"
