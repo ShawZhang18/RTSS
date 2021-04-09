@@ -7,6 +7,7 @@ import random
 from PIL import Image, ImageOps
 import numpy as np
 from . import preprocess
+import cv2
 
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG',
@@ -22,17 +23,22 @@ def default_loader(path):
 def disparity_loader(path):
     return Image.open(path).convert('L')
 
+def semantic_gt_loader(path):
+    return Image.open(path).convert('L')
+
 w_crop = 640
 h_crop = 400
 
 class myImageFloder(data.Dataset):
-    def __init__(self, left, right, left_disparity, training, fn=None, loader=default_loader, dploader= disparity_loader):
+    def __init__(self, left, right, left_disparity, semantic, training, fn=None, loader=default_loader, semantic_loader = semantic_gt_loader, dploader= disparity_loader):
  
         self.left = left
         self.right = right
         self.disp_L = left_disparity
+        self.semantic = semantic
         self.loader = loader
         self.dploader = dploader
+        self.semantic_loader = semantic_loader
         self.training = training
         self.fn = fn
 
@@ -40,11 +46,12 @@ class myImageFloder(data.Dataset):
         left  = self.left[index]
         right = self.right[index]
         disp_L= self.disp_L[index]
+        semantic_gt = self.semantic[index]
 
         left_img = self.loader(left)
         right_img = self.loader(right)
+        semantic_img = self.semantic_loader(semantic_gt)
         dataL = self.dploader(disp_L)
-
 
         if self.training:  
            w, h = left_img.size
@@ -55,6 +62,9 @@ class myImageFloder(data.Dataset):
 
            left_img = left_img.crop((x1, y1, x1 + tw, y1 + th))
            right_img = right_img.crop((x1, y1, x1 + tw, y1 + th))
+           semantic_img = semantic_img.crop((x1, y1, x1 + tw, y1 + th))
+           semantic_img = transforms.ToTensor()(semantic_img) * 255
+           semantic_img = semantic_img.long()
 
            dataL = np.ascontiguousarray(dataL,dtype=np.float32)
            dataL = dataL[y1:y1 + th, x1:x1 + tw]
@@ -63,7 +73,7 @@ class myImageFloder(data.Dataset):
            left_img   = processed(left_img)
            right_img  = processed(right_img)
 
-           return left_img, right_img, dataL
+           return left_img, right_img, dataL, semantic_img
         else:
            w, h = left_img.size
 

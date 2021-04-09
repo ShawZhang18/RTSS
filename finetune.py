@@ -13,6 +13,7 @@ import torch.backends.cudnn as cudnn
 
 import models.anynet
 
+
 import numpy as np
 import cv2 as cv2
 
@@ -49,6 +50,7 @@ parser.add_argument('--start_epoch_for_spn', type=int, default=121)
 parser.add_argument('--pretrained', type=str, default='results/pretrained_anynet/checkpoint.tar',
                     help='pretrained model path')
 parser.add_argument('--split_file', type=str, default=None)
+parser.add_argument('--is_training', type=bool)
 parser.add_argument('--evaluate', action='store_true')
 
 
@@ -66,17 +68,27 @@ def main():
     global args
     log = logger.setup_logger(args.save_path + '/training.log')
 
-    train_left_img, train_right_img, train_left_disp, test_left_img, test_right_img, test_left_disp, test_fn = ls.dataloader(
+    # train_left_img, train_right_img, train_left_disp, test_left_img, test_right_img, test_left_disp, test_fn = ls.dataloader(
+    #     args.datapath,log, args.split_file)
+    #
+    # TrainImgLoader = torch.utils.data.DataLoader(
+    #     DA.myImageFloder(train_left_img, train_right_img, train_left_disp, True),
+    #     batch_size=args.train_bsize, shuffle=True, num_workers=4, drop_last=False)
+    #
+    # TestImgLoader = torch.utils.data.DataLoader(
+    #     DA.myImageFloder(test_left_img, test_right_img, test_left_disp, False, test_fn),
+    #     batch_size=args.test_bsize, shuffle=False, num_workers=4, drop_last=False)
+
+    train_left_img, train_right_img, train_left_disp, test_left_img, test_right_img, left_val_disp, val_fn, left_train_semantic, left_val_semantic = ls.dataloader(
         args.datapath,log, args.split_file)
 
     TrainImgLoader = torch.utils.data.DataLoader(
-        DA.myImageFloder(train_left_img, train_right_img, train_left_disp, True),
+        DA.myImageFloder(train_left_img, train_right_img, train_left_disp, left_train_semantic, True),
         batch_size=args.train_bsize, shuffle=True, num_workers=4, drop_last=False)
 
     TestImgLoader = torch.utils.data.DataLoader(
-        DA.myImageFloder(test_left_img, test_right_img, test_left_disp, False, test_fn),
+        DA.myImageFloder(test_left_img, test_right_img, left_val_disp, False, val_fn),
         batch_size=args.test_bsize, shuffle=False, num_workers=4, drop_last=False)
-
     if not os.path.isdir(args.save_path):
         os.makedirs(args.save_path)
     for key, value in sorted(vars(args).items()):
@@ -122,15 +134,17 @@ def main():
 
         train(TrainImgLoader, model, optimizer, log, epoch)
 
-        savefilename = args.save_path + '/checkpoint.tar'
+        if epoch > 100 or epoch % 1 == 0:
+            pass
+        else:
+            continue
+
+        savefilename = args.save_path + '/checkpoint' + 'epoch' + '.tar'
         torch.save({
             'epoch': epoch,
             'state_dict': model.state_dict(),
             'optimizer': optimizer.state_dict(),
         }, savefilename)
-
-        if epoch % 1 ==0:
-            test(TestImgLoader, model, log)
 
     test(TestImgLoader, model, log)
     log.info('full training time = {:.2f} Hours'.format((time.time() - start_full_time) / 3600))
@@ -144,7 +158,9 @@ def train(dataloader, model, optimizer, log, epoch=0):
 
     model.train()
 
-    for batch_idx, (imgL, imgR, disp_L) in enumerate(dataloader):
+
+
+    for batch_idx, (imgL, imgR, disp_L, left_train_semantic) in enumerate(dataloader):
         imgL = imgL.float().cuda()
         imgR = imgR.float().cuda()
         disp_L = disp_L.float().cuda()
@@ -152,8 +168,11 @@ def train(dataloader, model, optimizer, log, epoch=0):
         optimizer.zero_grad()
         mask = disp_L > 0
         mask.detach_()
-        outputs = model(imgL, imgR)
+        outputs = model(imgL, imgR, left_train_semantic)
+        loss_seg = outputs[3]
+        outputs = outputs[0:3]
 
+        # zx comment,在一定的epoch之后才需要进行对spn的网络部分进行反向传播
         if args.with_spn:
             if epoch >= args.start_epoch_for_spn:
                 num_out = len(outputs)
@@ -165,6 +184,8 @@ def train(dataloader, model, optimizer, log, epoch=0):
         outputs = [torch.squeeze(output, 1) for output in outputs]
         loss = [args.loss_weights[x] * F.smooth_l1_loss(outputs[x][mask], disp_L[mask], size_average=True)
                 for x in range(num_out)]
+
+        # loss.append(loss_seg)
         sum(loss).backward()
         optimizer.step()
 

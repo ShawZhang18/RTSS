@@ -8,6 +8,68 @@ import math
 from .submodules import post_3dconvs,feature_extraction_conv
 import sys
 
+from seg_oprs.loss_oprs import ProbOhemCrossEntropy2d
+
+class ConvBnRelu(nn.Module):
+    def __init__(self, in_planes, out_planes, ksize, stride, pad, dilation=1,
+                 groups=1, has_bn=True, norm_layer=nn.BatchNorm2d, bn_eps=1e-5,
+                 has_relu=True, inplace=True, has_bias=False):
+        super(ConvBnRelu, self).__init__()
+        self.conv = nn.Conv2d(in_planes, out_planes, kernel_size=ksize,
+                              stride=stride, padding=pad,
+                              dilation=dilation, groups=groups, bias=has_bias)
+        self.has_bn = has_bn
+        if self.has_bn:
+            self.bn = norm_layer(out_planes, eps=bn_eps)
+        self.has_relu = has_relu
+        if self.has_relu:
+            self.relu = nn.ReLU(inplace=inplace)
+
+    def forward(self, x):
+        x = self.conv(x)
+        if self.has_bn:
+            x = self.bn(x)
+        if self.has_relu:
+            x = self.relu(x)
+
+        return x
+
+class BiSeNetHead(nn.Module):
+    def __init__(self, in_planes, out_planes, scale,
+                 is_aux=False, norm_layer=nn.BatchNorm2d):
+        super(BiSeNetHead, self).__init__()
+        if is_aux:
+            self.conv_3x3 = ConvBnRelu(in_planes, 256, 3, 1, 1,
+                                       has_bn=True, norm_layer=norm_layer,
+                                       has_relu=True, has_bias=False)
+        else:
+            self.conv_3x3 = ConvBnRelu(in_planes, 64, 3, 1, 1,
+                                       has_bn=True, norm_layer=norm_layer,
+                                       has_relu=True, has_bias=False)
+        if is_aux:
+            self.conv_1x1 = nn.Conv2d(256, out_planes, kernel_size=1,
+                                      stride=1, padding=0)
+        else:
+            self.conv_1x1 = nn.Conv2d(64, out_planes, kernel_size=1,
+                                      stride=1, padding=0)
+        self.scale = scale
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        fm = self.conv_3x3(x)
+        output = self.conv_1x1(fm)
+        # if self.scale > 1:
+        output = F.upsample(output, (256,512),
+                                   mode='bilinear')
+        return output
 
 class AnyNet(nn.Module):
     def __init__(self, args):
@@ -21,6 +83,21 @@ class AnyNet(nn.Module):
         self.channels_3d = args.channels_3d
         self.growth_rate = args.growth_rate
         self.with_spn = args.with_spn
+        self.is_training = args.is_training
+
+        conv_channel = 2
+        out_planes = 40 # num_classes
+        norm_layer = nn.BatchNorm2d
+        self.seg_head = nn.ModuleList([BiSeNetHead(conv_channel, out_planes, 16,
+                             True, norm_layer),
+                 BiSeNetHead(conv_channel, out_planes, 8,
+                             True, norm_layer),
+                 BiSeNetHead(conv_channel, out_planes, 8,
+                             False, norm_layer)])
+
+        self.semantic_criterion = ProbOhemCrossEntropy2d(ignore_label=255, thresh=0.6,
+                                                    min_kept=400 * 640 // 16,
+                                                    use_weight=False)
 
         if self.with_spn:
             try:
@@ -73,6 +150,8 @@ class AnyNet(nn.Module):
             elif isinstance(m, nn.Linear):
                 m.bias.data.zero_()
 
+
+
     def warp(self, x, disp):
         """
         warp an image/tensor (im2) back to im1, according to the optical flow
@@ -122,13 +201,26 @@ class AnyNet(nn.Module):
         cost = cost.view(size[0],-1, size[2],size[3])
         return cost.contiguous()
 
+    def pred_seg(self, feat_l):
+        # if self.is_training:
+        #     loss0 = self.seg_head[0](feat_l[-1])
+        #     loss1 = self.seg_head[1](feat_l[-1])
+        #     loss2 = self.seg_head[2](feat_l[-1])
+        #     return loss0 + loss1 + loss2
+        # else:
+        pred_out = self.seg_head[2](feat_l[-1])
+        return pred_out
 
-    def forward(self, left, right):
+
+    def forward(self, left, right, semantic):
 
         img_size = left.size()
 
         feats_l = self.feature_extraction(left)
         feats_r = self.feature_extraction(right)
+        # for i in feats_l:
+        #     print(i.shape)
+
         pred = []
         for scale in range(len(feats_l)):
             if scale > 0:
@@ -154,7 +246,6 @@ class AnyNet(nn.Module):
                 disp_up = F.upsample(pred_low_res, (img_size[2], img_size[3]), mode='bilinear')
                 pred.append(disp_up+pred[scale-1])
 
-
         if self.refine_spn:
             spn_out = self.refine_spn[0](nn.functional.upsample(left, (img_size[2]//4, img_size[3]//4), mode='bilinear'))
             G1, G2, G3 = spn_out[:,:self.spn_init_channels,:,:], spn_out[:,self.spn_init_channels:self.spn_init_channels*2,:,:], spn_out[:,self.spn_init_channels*2:,:,:]
@@ -167,7 +258,10 @@ class AnyNet(nn.Module):
             refine_flow = self.refine_spn[2](refine_flow)
             pred.append(nn.functional.upsample(refine_flow, (img_size[2] , img_size[3]), mode='bilinear'))
 
+        pred_seg_out = self.pred_seg(feats_l)
+        loss_smantic = self.semantic_criterion(pred_seg_out, semantic)
 
+        pred.append(loss_smantic)
         return pred
 
 class disparityregression2(nn.Module):
