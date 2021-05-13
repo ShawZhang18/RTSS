@@ -37,8 +37,8 @@ class unetUp(nn.Module):
 
     def forward(self, inputs1, inputs2):
         outputs2 = self.up(inputs2)
-        buttom, right = inputs1.size(2)%2, inputs1.size(3)%2
-        outputs2 = F.pad(outputs2, (0, -right, 0, -buttom))
+        buttom, right = inputs1.size(2) - outputs2.size(2), inputs1.size(3) - outputs2.size(3)
+        outputs2 = F.pad(outputs2, (0, right, 0, buttom))
         return self.conv(torch.cat([inputs1, outputs2], 1))
 
 class feature_extraction_conv(nn.Module):
@@ -58,11 +58,11 @@ class feature_extraction_conv(nn.Module):
 
         nC = 2*nC
         self.blocks = []
-        for i in range(2):
+        for i in range(3):
             self.blocks.append(self._make_block((2**i)*nC,  (2**(i+1))*nC, nblock))
 
         self.upblocks = []
-        for i in reversed(range(2)):
+        for i in reversed(range(3)):
             self.upblocks.append(unetUp(nC*2**(i+1), nC*2**i, False))
 
         self.blocks = nn.ModuleList(self.blocks)
@@ -88,10 +88,10 @@ class feature_extraction_conv(nn.Module):
 
     def forward(self, x):
         downs = [self.block0(x)]
-        for i in range(2):
+        for i in range(3):
             downs.append(self.blocks[i](downs[-1]))
         downs = list(reversed(downs))
-        for i in range(1,3):
+        for i in range(1,4):
             downs[i] = self.upblocks[i-1](downs[i], downs[i-1])
         return downs
 

@@ -67,8 +67,55 @@ class BiSeNetHead(nn.Module):
         fm = self.conv_3x3(x)
         output = self.conv_1x1(fm)
         # if self.scale > 1:
-        output = F.upsample(output, (256,512),
+        output = F.upsample(output, self.scale,
                                    mode='bilinear')
+        return output
+
+class AttentionRefinement(nn.Module):
+    def __init__(self, in_planes, out_planes,
+                 norm_layer=nn.BatchNorm2d):
+        super(AttentionRefinement, self).__init__()
+        self.conv_3x3 = ConvBnRelu(in_planes, out_planes, 3, 1, 1,
+                                   has_bn=True, norm_layer=norm_layer,
+                                   has_relu=True, has_bias=False)
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            ConvBnRelu(out_planes, out_planes, 1, 1, 0,
+                       has_bn=True, norm_layer=norm_layer,
+                       has_relu=False, has_bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        fm = self.conv_3x3(x)
+        fm_se = self.channel_attention(fm)
+        fm = fm * fm_se
+
+        return fm
+
+class FeatureFusion(nn.Module):
+    def __init__(self, in_planes, out_planes,
+                 reduction=1, norm_layer=nn.BatchNorm2d):
+        super(FeatureFusion, self).__init__()
+        self.conv_1x1 = ConvBnRelu(in_planes, out_planes, 1, 1, 0,
+                                   has_bn=True, norm_layer=norm_layer,
+                                   has_relu=True, has_bias=False)
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            ConvBnRelu(out_planes, out_planes // reduction, 1, 1, 0,
+                       has_bn=False, norm_layer=norm_layer,
+                       has_relu=True, has_bias=False),
+            ConvBnRelu(out_planes // reduction, out_planes, 1, 1, 0,
+                       has_bn=False, norm_layer=norm_layer,
+                       has_relu=False, has_bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x1, x2):
+        fm = torch.cat([x1, x2], dim=1)
+        fm = self.conv_1x1(fm)
+        fm_se = self.channel_attention(fm)
+        output = fm + fm * fm_se
         return output
 
 class AnyNet(nn.Module):
@@ -85,18 +132,34 @@ class AnyNet(nn.Module):
         self.with_spn = args.with_spn
         self.is_training = args.is_training
 
-        conv_channel = 2
-        out_planes = 40 # num_classes
+        self.ffm = FeatureFusion((4+2) * args.init_channels, (4+2) * args.init_channels, 1, norm_layer=nn.BatchNorm2d)
+
+        self.refines = nn.ModuleList([ConvBnRelu((16 + 8) * args.init_channels, 8 * args.init_channels, 3, 1, 1,
+                              has_bn=True, norm_layer=nn.BatchNorm2d,
+                              has_relu=True, has_bias=False),
+                   ConvBnRelu((4 + 8) * args.init_channels, 4 * args.init_channels, 3, 1, 1,
+                              has_bn=True, norm_layer=nn.BatchNorm2d,
+                              has_relu=True, has_bias=False)])
+
+        conv_channel = 80
+        out_planes = args.seg_classes # num_classes
         norm_layer = nn.BatchNorm2d
-        self.seg_head = nn.ModuleList([BiSeNetHead(conv_channel, out_planes, 16,
+
+        up_scale = (1,1)
+        if self.is_training:
+            up_scale = (256, 512)
+        else:
+            up_scale = (368, 1232)
+
+        self.seg_head = nn.ModuleList([BiSeNetHead(8 * args.init_channels, out_planes, up_scale,
                              True, norm_layer),
-                 BiSeNetHead(conv_channel, out_planes, 8,
+                 BiSeNetHead(4 * args.init_channels, out_planes, up_scale,
                              True, norm_layer),
-                 BiSeNetHead(conv_channel, out_planes, 8,
+                 BiSeNetHead((4 + 2) * args.init_channels, out_planes, up_scale,
                              False, norm_layer)])
 
         self.semantic_criterion = ProbOhemCrossEntropy2d(ignore_label=255, thresh=0.6,
-                                                    min_kept=400 * 640 // 16,
+                                                    min_kept=int (args.train_bsize // 1 * 256 * 512 // 8),
                                                     use_weight=False)
 
         if self.with_spn:
@@ -208,7 +271,21 @@ class AnyNet(nn.Module):
         #     loss2 = self.seg_head[2](feat_l[-1])
         #     return loss0 + loss1 + loss2
         # else:
-        pred_out = self.seg_head[2](feat_l[-1])
+        feat_upsample = F.upsample(feat_l[0], (feat_l[1].size(2), feat_l[1].size(3)),
+                   mode = 'bilinear')
+
+        feat_input = self.refines[0](torch.cat([feat_upsample, feat_l[1]], 1))
+        pred_out = [self.seg_head[0](feat_input)]
+
+        feat_upsample = F.upsample(feat_input, (feat_l[2].size(2), feat_l[2].size(3)),
+                   mode = 'bilinear')
+        feat_input = self.refines[1](torch.cat([feat_upsample, feat_l[2]], 1))
+        pred_out.append(self.seg_head[1](feat_input))
+
+        feat_upsample = F.upsample(feat_input, (feat_l[3].size(2), feat_l[3].size(3)),
+                   mode = 'bilinear')
+        feat_input = self.ffm(feat_upsample, feat_l[3])
+        pred_out.append(self.seg_head[2](feat_input))
         return pred_out
 
 
@@ -222,14 +299,14 @@ class AnyNet(nn.Module):
         #     print(i.shape)
 
         pred = []
-        for scale in range(len(feats_l)):
+        for scale in range(len(feats_l) - 1):
             if scale > 0:
-                wflow = F.upsample(pred[scale-1], (feats_l[scale].size(2), feats_l[scale].size(3)),
-                                   mode='bilinear') * feats_l[scale].size(2) / img_size[2]
-                cost = self._build_volume_2d3(feats_l[scale], feats_r[scale],
+                wflow = F.upsample(pred[scale-1], (feats_l[scale + 1].size(2), feats_l[scale + 1].size(3)),
+                                   mode='bilinear') * feats_l[scale + 1].size(2) / img_size[2]
+                cost = self._build_volume_2d3(feats_l[scale + 1], feats_r[scale + 1],
                                          self.maxdisplist[scale], wflow, stride=1)
             else:
-                cost = self._build_volume_2d(feats_l[scale], feats_r[scale],
+                cost = self._build_volume_2d(feats_l[scale + 1], feats_r[scale + 1],
                                              self.maxdisplist[scale], stride=1)
 
             cost = torch.unsqueeze(cost, 1)
@@ -258,10 +335,14 @@ class AnyNet(nn.Module):
             refine_flow = self.refine_spn[2](refine_flow)
             pred.append(nn.functional.upsample(refine_flow, (img_size[2] , img_size[3]), mode='bilinear'))
 
-        pred_seg_out = self.pred_seg(feats_l)
-        loss_smantic = self.semantic_criterion(pred_seg_out, semantic)
-
-        pred.append(loss_smantic)
+        if self.is_training:
+            pred_seg_out = self.pred_seg(feats_l)
+            aux_loss = self.semantic_criterion(pred_seg_out[1], semantic)
+            main_loss = self.semantic_criterion(pred_seg_out[-1], semantic)
+            pred.append(0.25 * aux_loss + main_loss)
+        else:
+            pred_seg_out = self.pred_seg(feats_l)
+            pred.append(pred_seg_out[-1].argmax(dim=1))
         return pred
 
 class disparityregression2(nn.Module):

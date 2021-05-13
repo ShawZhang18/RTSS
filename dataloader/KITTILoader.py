@@ -8,6 +8,7 @@ from PIL import Image, ImageOps
 import numpy as np
 from . import preprocess
 import cv2
+import imageio
 
 IMG_EXTENSIONS = [
     '.jpg', '.JPG', '.jpeg', '.JPEG',
@@ -23,14 +24,20 @@ def default_loader(path):
 def disparity_loader(path):
     return Image.open(path).convert('L')
 
-def semantic_gt_loader(path):
-    return Image.open(path).convert('L')
+def disparity_loader(path):
+    return Image.open(path)
 
-w_crop = 640
-h_crop = 400
+def semantic_gt_loader_np(path):
+    return np.array(cv2.imread(path, cv2.IMREAD_GRAYSCALE), dtype=np.uint8)
+
+# def semantic_gt_loader_np(path):
+#     return imageio.imread(path)
+
+w_crop = 1232
+h_crop = 368
 
 class myImageFloder(data.Dataset):
-    def __init__(self, left, right, left_disparity, semantic, training, fn=None, loader=default_loader, semantic_loader = semantic_gt_loader, dploader= disparity_loader):
+    def __init__(self, left, right, left_disparity, semantic, training, fn=None, loader=default_loader, semantic_loader = semantic_gt_loader_np, dploader= disparity_loader):
  
         self.left = left
         self.right = right
@@ -62,11 +69,12 @@ class myImageFloder(data.Dataset):
 
            left_img = left_img.crop((x1, y1, x1 + tw, y1 + th))
            right_img = right_img.crop((x1, y1, x1 + tw, y1 + th))
-           semantic_img = semantic_img.crop((x1, y1, x1 + tw, y1 + th))
-           semantic_img = transforms.ToTensor()(semantic_img) * 255
-           semantic_img = semantic_img.long()
+           # semantic_img = semantic_img.crop((x1, y1, x1 + tw, y1 + th))
+           # semantic_img = transforms.ToTensor()(semantic_img)
+           # semantic_img = semantic_img.long()
+           semantic_img = semantic_img[y1:y1+th, x1:x1+tw]
 
-           dataL = np.ascontiguousarray(dataL,dtype=np.float32)
+           dataL = np.ascontiguousarray(dataL,dtype=np.float32) / 256
            dataL = dataL[y1:y1 + th, x1:x1 + tw]
 
            processed = preprocess.get_transform(augment=False)  
@@ -79,18 +87,17 @@ class myImageFloder(data.Dataset):
 
            left_img = left_img.crop((w-w_crop, h-h_crop, w, h))
            right_img = right_img.crop((w-w_crop, h-h_crop, w, h))
-           w1, h1 = left_img.size
+           semantic_img = semantic_img[h-h_crop:h, w-w_crop:w]
 
-           # print(w1, h1)
            dataL = dataL.crop((w-w_crop, h-h_crop, w, h))
-           dataL = np.ascontiguousarray(dataL,dtype=np.float32)
+           dataL = np.ascontiguousarray(dataL,dtype=np.float32) / 256
 
-           processed = preprocess.get_transform(augment=False)  
+           processed = preprocess.get_transform(augment=False)
            left_img       = processed(left_img)
            right_img      = processed(right_img)
            fn0 = self.fn[index]
 
-           return left_img, right_img, dataL, fn0
+           return left_img, right_img, dataL, semantic_img, fn0
 
     def __len__(self):
         return len(self.left)

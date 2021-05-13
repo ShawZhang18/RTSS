@@ -13,9 +13,10 @@ import torch.backends.cudnn as cudnn
 
 import models.anynet
 
-
 import numpy as np
 import cv2 as cv2
+
+os.environ['CUDA_VISIBLE_DEVICES']='0'
 
 parser = argparse.ArgumentParser(description='Anynet fintune on KITTI')
 parser.add_argument('--maxdisp', type=int, default=192,
@@ -25,32 +26,42 @@ parser.add_argument('--max_disparity', type=int, default=192)
 parser.add_argument('--maxdisplist', type=int, nargs='+', default=[12, 3, 3])
 parser.add_argument('--datatype', default='2015',
                     help='datapath')
-parser.add_argument('--datapath', default=None, help='datapath')
+# 各种路径修改
+parser.add_argument('--datapath', default='/home/zhangxiao/data/kitti2015/data_scene_flow/training/', help='datapath')
+
+# parser.add_argument('--pretrained', type=str, default='/home/zhangxiao/modelzoo/AnyNet/owner_pretrained/checkpoint/kitti2015_ck/checkpoint.tar',
+# parser.add_argument('--pretrained', type=str, default='results/zacao_kitti/models/checkpoint.tar',
+# parser.add_argument('--pretrained', type=str, default='/home/zhangxiao/code/AnyNet/results/kitti2015_multi/models05091412/checkpoint80.tar',
+parser.add_argument('--pretrained', type=str, default=None,
+                    help='pretrained model path')
+parser.add_argument('--save_path', type=str, default='results/kitti2015_multi/models/',
+                    help='the path of saving checkpoints and log')
+
+parser.add_argument('--split_file', type=str, default='/home/zhangxiao/data/kitti2015/data_scene_flow/split_val.txt')
+
 parser.add_argument('--epochs', type=int, default=400,
                     help='number of epochs to train')
-parser.add_argument('--train_bsize', type=int, default=12,
+parser.add_argument('--seg_classes', type=int, default=34,
+                    help='number of epochs to train')
+parser.add_argument('--train_bsize', type=int, default=6,
                     help='batch size for training (default: 6)')
-parser.add_argument('--test_bsize', type=int, default=1,
+parser.add_argument('--test_bsize', type=int, default=6,
                     help='batch size for testing (default: 8)')
-parser.add_argument('--save_path', type=str, default='results/finetune_anynet',
-                    help='the path of saving checkpoints and log')
+
 parser.add_argument('--resume', type=str, default=None,
                     help='resume path')
 parser.add_argument('--lr', type=float, default=5e-4,
                     help='learning rate')
-parser.add_argument('--with_spn', action='store_true', help='with spn network or not')
+parser.add_argument('--with_spn', action='store_true',default=False, help='with spn network or not')
 parser.add_argument('--print_freq', type=int, default=5, help='print frequence')
-parser.add_argument('--init_channels', type=int, default=1, help='initial channels for 2d feature extractor')
+parser.add_argument('--init_channels', type=int, default=8, help='initial channels for 2d feature extractor')
 parser.add_argument('--nblocks', type=int, default=2, help='number of layers in each stage')
 parser.add_argument('--channels_3d', type=int, default=4, help='number of initial channels 3d feature extractor ')
 parser.add_argument('--layers_3d', type=int, default=4, help='number of initial layers in 3d network')
 parser.add_argument('--growth_rate', type=int, nargs='+', default=[4,1,1], help='growth rate in the 3d network')
 parser.add_argument('--spn_init_channels', type=int, default=8, help='initial channels for spnet')
 parser.add_argument('--start_epoch_for_spn', type=int, default=121)
-parser.add_argument('--pretrained', type=str, default='results/pretrained_anynet/checkpoint.tar',
-                    help='pretrained model path')
-parser.add_argument('--split_file', type=str, default=None)
-parser.add_argument('--is_training', type=bool)
+parser.add_argument('--is_training', type=bool, default=True)
 parser.add_argument('--evaluate', action='store_true')
 
 
@@ -60,6 +71,8 @@ if args.datatype == '2015':
     from dataloader import KITTIloader2015 as ls
 elif args.datatype == '2012':
     from dataloader import KITTIloader2012 as ls
+elif args.datatype == 'CityScape':
+    from dataloader import listCityScape as ls
 elif args.datatype == 'other':
     from dataloader import diy_dataset as ls
 
@@ -89,6 +102,7 @@ def main():
     TestImgLoader = torch.utils.data.DataLoader(
         DA.myImageFloder(test_left_img, test_right_img, left_val_disp, False, val_fn),
         batch_size=args.test_bsize, shuffle=False, num_workers=4, drop_last=False)
+
     if not os.path.isdir(args.save_path):
         os.makedirs(args.save_path)
     for key, value in sorted(vars(args).items()):
@@ -96,6 +110,7 @@ def main():
 
     model = models.anynet.AnyNet(args)
     model = nn.DataParallel(model).cuda()
+    # model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
     log.info('Number of model parameters: {}'.format(sum([p.data.nelement() for p in model.parameters()])))
 
@@ -134,19 +149,15 @@ def main():
 
         train(TrainImgLoader, model, optimizer, log, epoch)
 
-        if epoch > 100 or epoch % 1 == 0:
-            pass
-        else:
-            continue
+        if epoch % 10 == 0 or (args.epochs - epoch) < 10:
+            savefilename = args.save_path + 'checkpoint' + str(epoch) + '.tar'
+            torch.save({
+                'epoch': epoch,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+            }, savefilename)
 
-        savefilename = args.save_path + '/checkpoint' + 'epoch' + '.tar'
-        torch.save({
-            'epoch': epoch,
-            'state_dict': model.state_dict(),
-            'optimizer': optimizer.state_dict(),
-        }, savefilename)
-
-    test(TestImgLoader, model, log)
+    # test(TestImgLoader, model, log)
     log.info('full training time = {:.2f} Hours'.format((time.time() - start_full_time) / 3600))
 
 
@@ -157,8 +168,6 @@ def train(dataloader, model, optimizer, log, epoch=0):
     length_loader = len(dataloader)
 
     model.train()
-
-
 
     for batch_idx, (imgL, imgR, disp_L, left_train_semantic) in enumerate(dataloader):
         imgL = imgL.float().cuda()
@@ -182,19 +191,21 @@ def train(dataloader, model, optimizer, log, epoch=0):
             num_out = len(outputs)
 
         outputs = [torch.squeeze(output, 1) for output in outputs]
-        loss = [args.loss_weights[x] * F.smooth_l1_loss(outputs[x][mask], disp_L[mask], size_average=True)
-                for x in range(num_out)]
-
+        # loss = [args.loss_weights[x] * F.smooth_l1_loss(outputs[x][mask], disp_L[mask], size_average=True)
+                # for x in range(num_out)]
+        loss = [loss_seg]
         # loss.append(loss_seg)
-        sum(loss).backward()
+        loss[0].sum().backward()
         optimizer.step()
 
-        for idx in range(num_out):
-            losses[idx].update(loss[idx].item())
+        # for idx in range(num_out):
+            # losses[idx].update(loss[idx].item())
 
         if batch_idx % args.print_freq:
-            info_str = ['Stage {} = {:.2f}({:.2f})'.format(x, losses[x].val, losses[x].avg) for x in range(num_out)]
-            info_str = '\t'.join(info_str)
+            info_str = " "
+            # info_str = ['Stage {} = {:.2f}({:.2f})'.format(x, losses[x].val, losses[x].avg) for x in range(num_out)]
+            # info_str = '\t'.join(info_str)
+            info_str = info_str + '\t' + 'loss_seg = {:.2f}'.format(loss_seg.item())
 
             log.info('Epoch{} [{}/{}] {}'.format(
                 epoch, batch_idx, length_loader, info_str))
